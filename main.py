@@ -4834,6 +4834,18 @@ URL_BONOS_DIRECTO = os.environ.get(
     "URL_BONOS_DIRECTO",
     "https://dashboard482.github.io/dashboard/bono_30y.html"
 )
+URL_PRESION_DIRECTO = os.environ.get(
+    "URL_PRESION_DIRECTO",
+    "https://dashboard482.github.io/dashboard/presion_directo.html"
+)
+URL_M2_DIRECTO = os.environ.get(
+    "URL_M2_DIRECTO",
+    "https://dashboard482.github.io/dashboard/m2_btc_directo.html"
+)
+URL_TICKER_DIRECTO = os.environ.get(
+    "URL_TICKER_DIRECTO",
+    "https://dashboard482.github.io/dashboard/ticker_cripto.html"
+)
 
 @bot.message_handler(commands=["directo"])
 def cmd_directo(msg):
@@ -4848,10 +4860,16 @@ def cmd_directo(msg):
         f"{URL_MUROS_DIRECTO}\n\n"
         "🔥 Velas + mapa de calor — lo mismo, pero con una franja de calor del libro de órdenes en vez de líneas:\n"
         f"{URL_CALOR_DIRECTO}\n\n"
+        "🟢🔴 Presión de compra/venta en directo — toda la pantalla cambia de color según quién domina, con velas en directo:\n"
+        f"{URL_PRESION_DIRECTO}\n\n"
         "🩸 Liquidaciones estimadas — BTC, ETH, SOL y HYPE, con zoom y desplazamiento táctil, corto plazo y 24h:\n"
         f"{URL_LIQUIDACIONES_DIRECTO}\n\n"
         "📉 Bonos del Tesoro EEUU — rendimiento a 30, 10 y 2 años, gráfico oficial de la Reserva Federal (FRED):\n"
         f"{URL_BONOS_DIRECTO}\n\n"
+        "📊 Liquidez global (Fed+BCE+BoJ) vs BTC — desplazada 90 días, velas en directo:\n"
+        f"{URL_M2_DIRECTO}\n\n"
+        "🪙 Ticker en directo — BTC y otras 21 criptos, con BTC en modo espectacular:\n"
+        f"{URL_TICKER_DIRECTO}\n\n"
         "Son páginas aparte (no dentro de Telegram): tócalas para abrirlas en el navegador.")
 
 @bot.message_handler(commands=["vwap"])
@@ -5295,6 +5313,9 @@ Titulares de bolsa/economía/cripto de varias fuentes, con análisis de IA basad
 ━━━ /ticker ━━━
 Resumen visual al momento de ~30 activos (cripto, acciones, índices, oro).
 
+━━━ /directo ━━━
+Enlaces a las 8 páginas que se actualizan en directo en el navegador (no dentro de Telegram): cinta de precios, velas+muros, velas+mapa de calor, presión de compra/venta, liquidaciones estimadas, bonos del Tesoro, liquidez global vs BTC, y el ticker con BTC en modo espectacular.
+
 ━━━ Automatizaciones (sin comando) ━━━
 • Cada 2h (9-21h): mismo resumen visual de /ticker, automático
 • Cada mañana 8h: resumen diario (BTC, Fear&Greed, titulares)
@@ -5360,7 +5381,7 @@ MENU_COMANDOS = [
     ("vwap", "VWAP de hoy con bandas — cripto o acciones, TICKER opcional"),
     ("noticias", "Noticias de bolsa, economía y cripto"),
     ("ticker", "Resumen de mercados al momento"),
-    ("directo", "Enlaces a las 4 páginas en directo (cinta, muros, mapa de calor, liquidaciones)"),
+    ("directo", "Enlaces a las 8 páginas en directo (cinta, muros, calor, presión, liquidaciones, bonos, liquidez global, ticker)"),
 ]
 
 if __name__ == "__main__":
@@ -5379,8 +5400,3 @@ if __name__ == "__main__":
     log.info("AnalisisPro Bot arrancado")
     threading.Thread(target=_scheduler_loop, daemon=True).start()
     bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
-
-
-
-
-
