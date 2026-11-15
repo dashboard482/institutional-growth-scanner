@@ -2197,7 +2197,8 @@ def calcular_broadcast():
             if not d and ticker in BROADCAST_FALLBACK:
                 d = get_quote(BROADCAST_FALLBACK[ticker])
             if d:
-                resultados.append({"grupo": grupo, "nombre": nombre, "d1": d["d1"]})
+                resultados.append({"grupo": grupo, "nombre": nombre, "d1": d["d1"],
+                                   "price": d.get("price")})
             else:
                 faltan.append(nombre)
             time.sleep(0.3)
@@ -2210,7 +2211,8 @@ def calcular_broadcast():
             # coincidiría con dónde termina el grupo de verdad).
             pos_insercion = sum(1 for r in resultados if r["grupo"] == "🪙 Cripto")
             resultados.insert(pos_insercion,
-                              {"grupo": "🪙 Cripto", "nombre": nombre, "d1": d["d1"]})
+                              {"grupo": "🪙 Cripto", "nombre": nombre, "d1": d["d1"],
+                               "price": d.get("price")})
         else:
             faltan.append(nombre)
         time.sleep(0.3)
@@ -2218,6 +2220,50 @@ def calcular_broadcast():
     log.info(f"calcular_broadcast: {len(resultados)} activos en {time.time()-t0:.0f}s; "
              f"sin datos: {faltan or 'ninguno'}")
     return resultados
+
+# ── Publicación del resumen en GitHub (para la página ticker.html del Hub) ──
+# Las acciones, índices y oro no se pueden pedir directamente desde el navegador
+# (Yahoo bloquea), pero el bot sí los tiene. Cada vez que calcula el resumen,
+# guarda mercados.json en el repo de la web y la página lo lee de ahí.
+# Necesita 2 variables en Railway (si faltan, no hace nada y no da error):
+#   GITHUB_TOKEN = token con permiso de escritura en el contenido del repo
+#   GITHUB_REPO  = dashboard482/dashboard   (usuario/repo)
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "dashboard482/dashboard")
+GITHUB_JSON_PATH = os.environ.get("GITHUB_JSON_PATH", "mercados.json")
+
+def publicar_mercados_json(resultados):
+    if not GITHUB_TOKEN or not resultados:
+        return
+    try:
+        import base64
+        datos = {}
+        for r in resultados:
+            if r.get("price") is None:
+                continue
+            datos[r["nombre"]] = {"p": round(float(r["price"]), 6), "c": round(float(r["d1"]), 4),
+                                  "g": r["grupo"]}
+        if not datos:
+            return
+        cuerpo = json.dumps({"t": int(time.time()), "d": datos}, ensure_ascii=False, separators=(",", ":"))
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_JSON_PATH}"
+        cab = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+        sha = None
+        g = requests.get(url, headers=cab, timeout=10)
+        if g.status_code == 200:
+            sha = g.json().get("sha")
+        payload = {"message": "mercados.json (resumen automático del bot)",
+                   "content": base64.b64encode(cuerpo.encode("utf-8")).decode("ascii")}
+        if sha:
+            payload["sha"] = sha
+        r = requests.put(url, headers=cab, json=payload, timeout=15)
+        if r.status_code in (200, 201):
+            log.info(f"publicar_mercados_json: {len(datos)} activos publicados")
+        else:
+            log.warning(f"publicar_mercados_json: HTTP {r.status_code} {r.text[:150]}")
+    except Exception as e:
+        log.warning(f"publicar_mercados_json: {e}")
 
 def _bolsa_eeuu_abierta():
     """Aproximado: lunes-viernes 9:30-16:00 hora de Nueva York (no contempla festivos)."""
@@ -2356,6 +2402,7 @@ def cmd_ticker(msg):
         safe_send(msg.chat.id, "No he podido obtener datos ahora mismo. Reintenta en un momento.",
                   message_id=m.message_id)
         return
+    threading.Thread(target=publicar_mercados_json, args=(resultados,), daemon=True).start()
     try:
         img_bytes = chart_broadcast(resultados)
         bot.delete_message(msg.chat.id, m.message_id)
@@ -2504,6 +2551,7 @@ def ejecutar_broadcast_hora():
     try:
         resultados = calcular_broadcast()
         if resultados:
+            threading.Thread(target=publicar_mercados_json, args=(resultados,), daemon=True).start()
             img_bytes = chart_broadcast(resultados)
             for cid in destinatarios:
                 try:
