@@ -1218,6 +1218,7 @@ def cmd_start(msg):
         "/rsiminimos — Cripto y acciones cerca de su mínimo de RSI en 2 años\n"
         "/vwap TICKER — Precio medio ponderado por volumen de hoy, cripto o acción\n"
         "/directo — Enlaces a las páginas en directo (cinta, muros, mapa de calor, liquidaciones)\n\n"
+        "/terms /support /paysupport — Información sobre las donaciones con Estrellas\n\n"
         "/guia — Explicación completa de cada comando\n"
         "/dyor — Aviso legal (léelo antes de usar el bot para decidir)\n\n"
         "Además, cada 2h (9-21h) recibes un resumen automático de mercados y "
@@ -5357,6 +5358,140 @@ def cmd_dyor(msg):
     safe_send(msg.chat.id, TEXTO_DYOR)
 
 
+
+# ═══ DONACIONES CON ESTRELLAS DE TELEGRAM (XTR) ═════════════════
+# Solo donaciones voluntarias, sin contraprestación ni acceso a nada. El bot sigue siendo de
+# uso personal: los comandos de análisis solo responden a ALLOWED_USER_ID. Los eventos de pago
+# (pre_checkout_query y successful_payment) NO pasan por ese filtro, para que cualquiera pueda
+# donar desde la página de donaciones del Hub.
+# - /enlaces (solo tú): crea los 3 enlaces de pago (50, 150 y 500 ⭐) para pegarlos en donaciones.html
+# - /reembolso (solo tú): devuelve una donación con el id de cargo que te llega en cada aviso
+# - /terms, /support, /paysupport: los exige Telegram a cualquier bot que cobre en Estrellas
+
+DONACIONES_NIVELES = {
+    50:  ("Café para el Creador", "Donación voluntaria de 50 Estrellas al Hub Financiero. Gracias por apoyar el proyecto."),
+    150: ("Impulso Pro", "Donación voluntaria de 150 Estrellas al Hub Financiero. Gracias por apoyar el proyecto."),
+    500: ("Socio Fundador", "Donación voluntaria de 500 Estrellas al Hub Financiero. Gracias por apoyar el proyecto."),
+}
+DONACIONES_LOG = os.environ.get("DONACIONES_LOG", _p("donaciones.json"))
+
+def _tg_api(metodo, payload):
+    """Llamada directa a la Bot API (independiente de la versión de pyTelegramBotAPI instalada)."""
+    r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{metodo}", json=payload, timeout=15)
+    try:
+        j = r.json()
+    except Exception:
+        j = {"ok": False, "description": f"HTTP {r.status_code}"}
+    return j
+
+def _guardar_donacion(registro):
+    try:
+        try:
+            with open(DONACIONES_LOG, "r") as f:
+                datos = json.load(f)
+        except Exception:
+            datos = []
+        datos.append(registro)
+        with open(DONACIONES_LOG, "w") as f:
+            json.dump(datos[-500:], f)
+    except Exception as e:
+        log.warning(f"_guardar_donacion: {e}")
+
+@bot.message_handler(commands=["enlaces"])
+def cmd_enlaces(msg):
+    if msg.from_user.id != ALLOWED_USER_ID:
+        return
+    lineas = ["🔗 ENLACES DE DONACIÓN (pégalos en LINKS de donaciones.html)\n"]
+    for cantidad, (titulo, desc) in DONACIONES_NIVELES.items():
+        j = _tg_api("createInvoiceLink", {
+            "title": titulo[:32], "description": desc[:255],
+            "payload": f"donacion_{cantidad}", "currency": "XTR",
+            "prices": [{"label": titulo[:32], "amount": cantidad}],
+        })
+        if j.get("ok"):
+            lineas.append(f"{cantidad} ⭐ — {titulo}\n{j['result']}\n")
+        else:
+            lineas.append(f"{cantidad} ⭐ — error: {j.get('description')}\n")
+    safe_send(msg.chat.id, "\n".join(lineas), disable_web_page_preview=True)
+
+@bot.pre_checkout_query_handler(func=lambda q: True)
+def pre_checkout(q):
+    try:
+        cantidad = int(q.total_amount)
+        valido = (q.currency == "XTR" and str(q.invoice_payload) == f"donacion_{cantidad}"
+                  and cantidad in DONACIONES_NIVELES)
+        if valido:
+            bot.answer_pre_checkout_query(q.id, ok=True)
+        else:
+            bot.answer_pre_checkout_query(q.id, ok=False, error_message="Donación no válida. Vuelve a intentarlo desde la página de donaciones.")
+    except Exception as e:
+        log.error(f"pre_checkout: {e}")
+        try:
+            bot.answer_pre_checkout_query(q.id, ok=False, error_message="Error temporal. Inténtalo de nuevo en un momento.")
+        except Exception:
+            pass
+
+@bot.message_handler(content_types=["successful_payment"])
+def pago_recibido(msg):
+    try:
+        p = msg.successful_payment
+        quien = msg.from_user
+        nombre = quien.first_name or "amigo"
+        _guardar_donacion({"user_id": quien.id, "usuario": quien.username, "cantidad": p.total_amount,
+                           "cargo": p.telegram_payment_charge_id, "fecha": datetime.now(MADRID).isoformat()})
+        safe_send(msg.chat.id, f"¡Gracias {nombre}! 🌟 Has donado {p.total_amount} ⭐ al Hub Financiero. Se agradece muchísimo.")
+        if ALLOWED_USER_ID:
+            alias = f"@{quien.username}" if quien.username else quien.first_name
+            safe_send(ALLOWED_USER_ID,
+                f"🌟 NUEVA DONACIÓN: {p.total_amount} ⭐\nDe: {alias} (id {quien.id})\n"
+                f"Id de cargo (por si hay que reembolsar):\n{p.telegram_payment_charge_id}\n\n"
+                f"Reembolso: /reembolso {quien.id} {p.telegram_payment_charge_id}")
+    except Exception as e:
+        log.error(f"pago_recibido: {e}")
+
+@bot.message_handler(commands=["reembolso"])
+def cmd_reembolso(msg):
+    if msg.from_user.id != ALLOWED_USER_ID:
+        return
+    partes = msg.text.split()
+    if len(partes) != 3 or not partes[1].isdigit():
+        safe_send(msg.chat.id, "Uso: /reembolso ID_USUARIO ID_CARGO\n(Los dos datos vienen en el aviso de cada donación.)")
+        return
+    j = _tg_api("refundStarPayment", {"user_id": int(partes[1]), "telegram_payment_charge_id": partes[2]})
+    safe_send(msg.chat.id, "✅ Reembolso realizado." if j.get("ok") else f"No se pudo reembolsar: {j.get('description')}")
+
+@bot.message_handler(commands=["terms"])
+def cmd_terms(msg):
+    safe_send(msg.chat.id,
+        "Términos de las donaciones\n\n"
+        "Las donaciones con Estrellas de Telegram son voluntarias y no dan acceso a ningún servicio, "
+        "función ni contenido adicional: el Hub Financiero es gratuito para todos. "
+        "Sirven únicamente para apoyar el proyecto.\n\n"
+        "Si has donado por error, escribe /paysupport.\n\n"
+        "⚠️ La información del Hub y de este bot es orientativa, no asesoramiento financiero.")
+
+@bot.message_handler(commands=["support", "paysupport"])
+def cmd_support(msg):
+    safe_send(msg.chat.id,
+        "Soporte de donaciones\n\n"
+        "Si tienes algún problema con una donación (por ejemplo, la hiciste por error), "
+        "escribe aquí tu consulta junto con la fecha y la cantidad. Se revisa a mano y, "
+        "si procede, se reembolsa.\n\n"
+        "Nota: este bot es de uso personal y no atiende otras consultas.")
+
+@bot.message_handler(func=lambda m: (m.chat.type == "private" and m.from_user and m.from_user.id != ALLOWED_USER_ID
+                                      and m.content_type == "text" and not (m.text or "").startswith("/")))
+def mensaje_ajeno(msg):
+    """Texto libre de otra persona (p.ej. una consulta de soporte de donaciones): se reenvía al
+    propietario para poder responder. No ejecuta nada ni da acceso a los comandos de análisis."""
+    try:
+        if ALLOWED_USER_ID:
+            alias = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.first_name
+            safe_send(ALLOWED_USER_ID, f"✉️ Mensaje de {alias} (id {msg.from_user.id}):\n{msg.text[:1000]}")
+        safe_send(msg.chat.id, "Mensaje recibido. Gracias.")
+    except Exception as e:
+        log.warning(f"mensaje_ajeno: {e}")
+
 # ═══ Menú de comandos de Telegram (lo que sale al pulsar "/") ═══
 # El orden de esta lista es el orden del menú: /dyor va el primero.
 MENU_COMANDOS = [
@@ -5382,6 +5517,8 @@ MENU_COMANDOS = [
     ("noticias", "Noticias de bolsa, economía y cripto"),
     ("ticker", "Resumen de mercados al momento"),
     ("directo", "Enlaces a las 8 páginas en directo (cinta, muros, calor, presión, liquidaciones, bonos, liquidez global, ticker)"),
+    ("terms", "Términos de las donaciones con Estrellas"),
+    ("paysupport", "Soporte de donaciones"),
 ]
 
 if __name__ == "__main__":
