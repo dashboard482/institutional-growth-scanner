@@ -2105,7 +2105,7 @@ BROADCAST_CRYPTO_COINGECKO = {
 BROADCAST_STOCKS = {
     "Apple": "AAPL", "Microsoft": "MSFT", "Nvidia": "NVDA", "Amazon": "AMZN",
     "Google": "GOOGL", "Meta": "META", "Tesla": "TSLA", "JPMorgan": "JPM",
-    "Netflix": "NFLX", "SpaceX": "SPCX", "Strategy (Saylor)": "MSTR",
+    "Netflix": "NFLX", "SpaceX": "SPCX", "Anthropic": "ANT", "Strategy (Saylor)": "MSTR",
     "Walmart": "WMT", "Coca-Cola": "KO", "PURR (Hyperliquid Strategies)": "PURR",
 }
 BROADCAST_INDICES = {
@@ -4646,6 +4646,116 @@ def cmd_agente(msg):
             pass
     safe_send(msg.chat.id, f"🤖 CONCLUSIÓN DEL AGENTE\n\n{texto}")
 
+# ═══ AVISO DE MOVIMIENTO DE BTC — te escribe cada vez que BTC sube o baja X dólares ═══
+# Cada ~30 s mira el precio de BTC. Guarda el precio del último aviso y, cuando el
+# precio se aleja de ese nivel el paso configurado (por defecto 1.000 $), te avisa y
+# toma el precio actual como nuevo nivel de referencia. El estado se guarda en disco
+# (DATA_DIR), así que sobrevive a reinicios. Se maneja con /alertabtc.
+ALERTA_BTC_FILE = _p("alerta_btc.json")
+_alerta_btc = {"activa": True, "paso": 1000.0, "ref": None}
+_alerta_btc_lock = threading.Lock()
+
+def _alerta_btc_cargar():
+    try:
+        with open(ALERTA_BTC_FILE, "r") as f:
+            d = json.load(f)
+        _alerta_btc["activa"] = bool(d.get("activa", True))
+        _alerta_btc["paso"] = float(d.get("paso", 1000.0))
+        _alerta_btc["ref"] = d.get("ref")
+    except Exception:
+        pass
+
+def _alerta_btc_guardar():
+    try:
+        with open(ALERTA_BTC_FILE, "w") as f:
+            json.dump(_alerta_btc, f)
+    except Exception as e:
+        log.warning(f"_alerta_btc_guardar: {e}")
+
+def _precio_btc_ahora():
+    for host in ("api.binance.com", "data-api.binance.vision"):
+        try:
+            r = requests.get(f"https://{host}/api/v3/ticker/price", params={"symbol": "BTCUSDT"}, timeout=6)
+            if r.status_code == 200:
+                return float(r.json()["price"])
+        except Exception:
+            continue
+    return None
+
+def _alerta_btc_revisar():
+    precio = _precio_btc_ahora()
+    if precio is None:
+        return
+    with _alerta_btc_lock:
+        if not _alerta_btc["activa"]:
+            return
+        ref = _alerta_btc["ref"]
+        if ref is None:
+            _alerta_btc["ref"] = precio
+            _alerta_btc_guardar()
+            return
+        paso = _alerta_btc["paso"]
+        dif = precio - ref
+        if abs(dif) < paso:
+            return
+        _alerta_btc["ref"] = precio
+        _alerta_btc_guardar()
+    sube = dif > 0
+    flecha = "📈" if sube else "📉"
+    pct = dif / ref * 100
+    texto = (f"{flecha} BTC {'sube' if sube else 'baja'} ${abs(dif):,.0f}\n"
+             f"Ahora: ${precio:,.0f}  (antes ${ref:,.0f}, {pct:+.2f}%)")
+    for cid in _lista_suscriptores_activos():
+        try:
+            safe_send(cid, texto)
+        except Exception as e:
+            log.warning(f"alerta btc -> {cid}: {e}")
+
+def _alerta_btc_loop():
+    _alerta_btc_cargar()
+    log.info(f"Aviso de movimiento de BTC arrancado (activa={_alerta_btc['activa']}, paso={_alerta_btc['paso']:.0f})")
+    while True:
+        try:
+            _alerta_btc_revisar()
+        except Exception as e:
+            log.error(f"_alerta_btc_loop: {e}")
+        time.sleep(30)
+
+@bot.message_handler(commands=["alertabtc"])
+def cmd_alertabtc(msg):
+    """/alertabtc -> estado · /alertabtc on|off · /alertabtc 500 (cambia el paso en dólares)"""
+    if msg.from_user.id != ALLOWED_USER_ID:
+        return
+    args = msg.text.split()[1:]
+    with _alerta_btc_lock:
+        if args:
+            a = args[0].lower().replace("$", "").replace(".", "").replace(",", "")
+            if a in ("on", "activar", "si", "sí"):
+                _alerta_btc["activa"] = True
+                _alerta_btc["ref"] = None   # empieza a contar desde el precio de ahora
+            elif a in ("off", "desactivar", "no"):
+                _alerta_btc["activa"] = False
+            elif a.isdigit() and int(a) >= 50:
+                _alerta_btc["paso"] = float(int(a))
+                _alerta_btc["activa"] = True
+                _alerta_btc["ref"] = None
+            else:
+                safe_send(msg.chat.id, "Uso: /alertabtc (ver estado) · /alertabtc on · /alertabtc off · "
+                                       "/alertabtc 500 (avisar cada 500 $; mínimo 50)")
+                return
+            _alerta_btc_guardar()
+        estado = "🟢 activo" if _alerta_btc["activa"] else "🔴 apagado"
+        ref = _alerta_btc["ref"]
+        paso = _alerta_btc["paso"]
+    precio = _precio_btc_ahora()
+    lineas = [f"🔔 AVISO DE MOVIMIENTO DE BTC\n", f"Estado: {estado}", f"Aviso cada: ${paso:,.0f}"]
+    if ref:
+        lineas.append(f"Último nivel de referencia: ${ref:,.0f}")
+    if precio:
+        lineas.append(f"Precio ahora: ${precio:,.0f}")
+    lineas.append("\n/alertabtc on · /alertabtc off · /alertabtc 500")
+    safe_send(msg.chat.id, "\n".join(lineas))
+
 def _scheduler_loop():
     global _ultimo_broadcast_key, _ultimo_resumen_diario_key, _ultimo_oportunidades_key
     log.info("Scheduler de difusión automática arrancado")
@@ -5565,6 +5675,7 @@ MENU_COMANDOS = [
     ("noticias", "Noticias de bolsa, economía y cripto"),
     ("ticker", "Resumen de mercados al momento"),
     ("directo", "Enlaces a las 8 páginas en directo (cinta, muros, calor, presión, liquidaciones, bonos, liquidez global, ticker)"),
+    ("alertabtc", "Aviso cuando BTC sube o baja X dólares"),
     ("terms", "Términos de las donaciones con Estrellas"),
     ("paysupport", "Soporte de donaciones"),
 ]
@@ -5584,4 +5695,5 @@ if __name__ == "__main__":
         log.warning(f"set_my_commands: {e}")
     log.info("AnalisisPro Bot arrancado")
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+    threading.Thread(target=_alerta_btc_loop, daemon=True).start()
     bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
