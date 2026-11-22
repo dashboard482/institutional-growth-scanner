@@ -2543,24 +2543,28 @@ def cmd_scheduler_estado(msg):
         f"Suscriptores activos: {len(_lista_suscriptores_activos())}")
 
 def ejecutar_broadcast_hora():
-    destinatarios = _lista_suscriptores_activos()
-    if not destinatarios:
-        log.info("ejecutar_broadcast_hora: sin suscriptores activos, nada que enviar")
-        return
+    # Los envíos a tu chat se controlan con /canal personal on|off (apagados por defecto).
+    # Aunque estén apagados, los datos se calculan y se publican en mercados.json (los usa el Hub).
+    personal = bool(_canal.get("personal", False))
+    destinatarios = _lista_suscriptores_activos() if personal else []
 
     try:
         resultados = calcular_broadcast()
         if resultados:
             threading.Thread(target=publicar_mercados_json, args=(resultados,), daemon=True).start()
-            img_bytes = chart_broadcast(resultados)
-            for cid in destinatarios:
-                try:
-                    bot.send_photo(cid, io.BytesIO(img_bytes))
-                except Exception as e:
-                    log.warning(f"broadcast precio -> {cid}: {e}")
-                time.sleep(0.05)
+            if destinatarios:
+                img_bytes = chart_broadcast(resultados)
+                for cid in destinatarios:
+                    try:
+                        bot.send_photo(cid, io.BytesIO(img_bytes))
+                    except Exception as e:
+                        log.warning(f"broadcast precio -> {cid}: {e}")
+                    time.sleep(0.05)
     except Exception as e:
         log.error(f"ejecutar_broadcast_hora (precios): {e}")
+
+    if not destinatarios:
+        return
 
     try:
         alerta = revisar_noticias_relevantes()
@@ -4808,9 +4812,25 @@ CANAL_NOCHE = (23, 7)           # de las 23:00 a las 7:00 (hora de Madrid)
 CANAL_ESPERA_H = 3              # horas mínimas entre avisos de BTC
 CANAL_MAX_SONIDO_DIA = 4        # máximo de avisos con sonido por día
 CANAL_RESUMEN_HORAS = (9, 22)   # resúmenes diarios silenciosos (hora de Madrid)
+CANAL_BTC_PASO = 1000           # aviso SILENCIOSO cada vez que BTC se mueve esta cantidad ($)
+CANAL_BTC_MAX_DIA = 6           # máximo de avisos por niveles de BTC al día
+CANAL_ACTIVO_SUAVE = 2.0        # % en el día de un índice/oro -> aviso SILENCIOSO (1 por activo y día)
+CANAL_ACTIVO_FUERTE = 3.0       # % en el día -> aviso CON sonido (cuenta para el máximo de sonidos)
+CANAL_NOTICIAS_SEG = 1800       # cada cuánto se revisan las noticias (30 min)
+CANAL_MAX_NOTICIAS_DIA = 3      # máximo de noticias importantes al día (siempre en silencio)
+# Activos de bolsa: nombre -> (ticker, ticker alternativo, ventana horaria Madrid con el mercado abierto)
+CANAL_ACTIVOS = {
+    "S&P 500": ("^GSPC", "SPY", (15.5, 22.0)),
+    "Nasdaq": ("^IXIC", "QQQ", (15.5, 22.0)),
+    "IBEX 35": ("^IBEX", None, (9.0, 17.5)),
+    "DAX": ("^GDAXI", None, (9.0, 17.5)),
+    "Oro": ("GC=F", None, (9.0, 22.0)),
+}
 
 CANAL_FILE = _p("canal.json")
-_canal = {"activo": True, "ultimo_ts": 0, "ultimo_sonido": False, "dia": "", "sonidos_hoy": 0, "resumenes": []}
+_canal = {"activo": True, "ultimo_ts": 0, "ultimo_sonido": False, "dia": "", "sonidos_hoy": 0, "resumenes": [],
+          "btc_ancla": 0, "btc_niveles_hoy": 0, "activos_hoy": {}, "noticias_hoy": 0, "noticias_vistas": [],
+          "personal": False}
 _canal_lock = threading.Lock()
 
 def _canal_cargar():
@@ -4873,6 +4893,15 @@ def _es_noche(ahora):
     a, b = CANAL_NOCHE
     return ahora.hour >= a or ahora.hour < b
 
+def _canal_nuevo_dia(hoy):
+    """Reinicia los contadores diarios. Llamar SIEMPRE dentro de _canal_lock."""
+    if _canal.get("dia") != hoy:
+        _canal["dia"] = hoy
+        _canal["sonidos_hoy"] = 0
+        _canal["btc_niveles_hoy"] = 0
+        _canal["activos_hoy"] = {}
+        _canal["noticias_hoy"] = 0
+
 def _canal_revisar_btc():
     ahora = datetime.now(MADRID)
     precio, antes = _btc_hace_horas(CANAL_VENTANA_H)
@@ -4890,10 +4919,7 @@ def _canal_revisar_btc():
     with _canal_lock:
         if not _canal["activo"]:
             return
-        hoy = ahora.strftime("%Y-%m-%d")
-        if _canal.get("dia") != hoy:
-            _canal["dia"] = hoy
-            _canal["sonidos_hoy"] = 0
+        _canal_nuevo_dia(ahora.strftime("%Y-%m-%d"))
         en_espera = (time.time() - _canal.get("ultimo_ts", 0)) < CANAL_ESPERA_H * 3600
         # en espera solo se deja pasar una escalada de aviso silencioso a aviso con sonido
         if en_espera and not (suena and not _canal.get("ultimo_sonido")):
@@ -4916,6 +4942,137 @@ def _canal_revisar_btc():
     _canal_enviar(texto, silencioso=not suena, startapp="btc")
     log.info(f"Canal: aviso BTC {var:+.2f}% (sonido={suena})")
 
+def _quote_seguro(tk, fb=None):
+    for t in (tk, fb):
+        if not t:
+            continue
+        try:
+            d = get_quote(t)
+            if d and d.get("price"):
+                return d
+        except Exception as e:
+            log.warning(f"_quote_seguro {t}: {e}")
+    return None
+
+def _canal_revisar_niveles_btc():
+    """Aviso SILENCIOSO cada CANAL_BTC_PASO $ de movimiento (desde el último nivel avisado)."""
+    precio, _ = _btc_hace_horas(1)
+    if not precio:
+        return
+    ahora = datetime.now(MADRID)
+    with _canal_lock:
+        if not _canal["activo"]:
+            return
+        _canal_nuevo_dia(ahora.strftime("%Y-%m-%d"))
+        ancla = _canal.get("btc_ancla", 0)
+        if not ancla:
+            _canal["btc_ancla"] = round(precio / CANAL_BTC_PASO) * CANAL_BTC_PASO
+            _canal_guardar()
+            return
+        dif = precio - ancla
+        if abs(dif) < CANAL_BTC_PASO:
+            return
+        pasos = int(abs(dif) // CANAL_BTC_PASO)
+        sube = dif > 0
+        nuevo = ancla + (pasos if sube else -pasos) * CANAL_BTC_PASO
+        _canal["btc_ancla"] = nuevo
+        if _canal["btc_niveles_hoy"] >= CANAL_BTC_MAX_DIA:
+            _canal_guardar()
+            return
+        _canal["btc_niveles_hoy"] += 1
+        _canal_guardar()
+    texto = (f"{'🔼' if sube else '🔽'} BTC {'sube a' if sube else 'baja a'} ${_n(nuevo)}\n"
+             f"Ahora: ${_n(precio)}\n\n"
+             f"⚠️ Orientativo, no es asesoramiento financiero (DYOR).")
+    _canal_enviar(texto, silencioso=True, startapp="btc")
+    log.info(f"Canal: nivel BTC {nuevo}")
+
+def _canal_revisar_activos():
+    """Índices y oro: un aviso por activo y día si se mueve mucho (solo con el mercado abierto)."""
+    ahora = datetime.now(MADRID)
+    if ahora.weekday() >= 5:
+        return
+    h = ahora.hour + ahora.minute / 60
+    for nombre, (tk, fb, (h0, h1)) in CANAL_ACTIVOS.items():
+        if not (h0 <= h <= h1):
+            continue
+        with _canal_lock:
+            if not _canal["activo"]:
+                return
+            _canal_nuevo_dia(ahora.strftime("%Y-%m-%d"))
+            if nombre in _canal["activos_hoy"]:
+                continue
+        d = _quote_seguro(tk, fb)
+        if not d:
+            continue
+        var = d["d1"]
+        a = abs(var)
+        if a < CANAL_ACTIVO_SUAVE:
+            continue
+        with _canal_lock:
+            if nombre in _canal["activos_hoy"]:
+                continue
+            suena = a >= CANAL_ACTIVO_FUERTE and _canal["sonidos_hoy"] < CANAL_MAX_SONIDO_DIA
+            if suena:
+                _canal["sonidos_hoy"] += 1
+            _canal["activos_hoy"][nombre] = 1
+            _canal_guardar()
+        sube = var > 0
+        texto = (f"{'📈' if sube else '📉'} {nombre} {'sube' if sube else 'baja'} un {_n(a, 1)} % hoy\n"
+                 f"Ahora: {_n(d['price'])}\n\n"
+                 f"Mira el contexto en el Hub 👇\n"
+                 f"⚠️ Orientativo, no es asesoramiento financiero (DYOR).")
+        _canal_enviar(texto, silencioso=not suena)
+        log.info(f"Canal: aviso {nombre} {var:+.2f}% (sonido={suena})")
+
+def _canal_revisar_noticias():
+    """Noticias nuevas que la IA juzga muy importantes: siempre en silencio, con fuente y enlace."""
+    with _canal_lock:
+        if not _canal["activo"]:
+            return
+        _canal_nuevo_dia(datetime.now(MADRID).strftime("%Y-%m-%d"))
+        restan = CANAL_MAX_NOTICIAS_DIA - _canal["noticias_hoy"]
+        vistas = set(_canal.get("noticias_vistas", []))
+    data = fetch_todas_noticias()
+    nuevas = [(f, it) for f, items in data.items() for it in items if it["link"] not in vistas]
+    if not nuevas:
+        return
+    with _canal_lock:
+        _canal["noticias_vistas"] = (list(vistas) + [it["link"] for _, it in nuevas])[-500:]
+        _canal_guardar()
+    if not vistas or restan <= 0:   # primera vez: solo se anotan los titulares actuales
+        return
+    nuevas = nuevas[:20]
+    lista = "\n".join(f"{i + 1}. {it['title']}" for i, (_, it) in enumerate(nuevas))
+    prompt = ("Titulares NUEVOS de fuentes financieras y cripto:\n" + lista + "\n\n"
+              "Elige SOLO los que sean noticias de primer nivel con potencial de mover los mercados de forma "
+              "notable (decisiones de bancos centrales, quiebras, hackeos grandes, cambios regulatorios "
+              "importantes, datos macro muy sorprendentes). Sé muy exigente: ante la duda, no lo elijas. "
+              f"Máximo {min(2, restan)}. Formato exacto, una por línea: número|titular traducido al español "
+              "de forma literal, sin añadir nada que no esté en el titular. "
+              "Si ninguno lo merece, responde exactamente: NINGUNA")
+    resp = ask_ai(prompt, max_chars=700)
+    if not resp or "NINGUNA" in resp.upper()[:30]:
+        return
+    items = []
+    for linea in resp.splitlines():
+        m = re.match(r"^\s*[•\-]?\s*(\d{1,2})\s*\|\s*(.+)$", linea)
+        if m and 1 <= int(m.group(1)) <= len(nuevas):
+            f, it = nuevas[int(m.group(1)) - 1]
+            items.append((m.group(2).strip(), f, it["link"]))
+    items = items[:min(2, restan)]
+    if not items:
+        return
+    l = ["📰 Noticia importante\n"]
+    for es, f, link in items:
+        l.append(f"• {es}\n   {f} · {link}")
+    l.append("\n⚠️ Titulares automáticos, sin verificar. No es asesoramiento financiero (DYOR).")
+    with _canal_lock:
+        _canal["noticias_hoy"] += len(items)
+        _canal_guardar()
+    _canal_enviar("\n".join(l), silencioso=True)
+    log.info(f"Canal: {len(items)} noticia(s) importante(s)")
+
 _FG_ES = {"Extreme Fear": "Miedo extremo", "Fear": "Miedo", "Neutral": "Neutral",
           "Greed": "Codicia", "Extreme Greed": "Codicia extrema"}
 
@@ -4930,6 +5087,16 @@ def _canal_resumen(hora):
         l.append(f"   24 h: {(precio - ayer) / ayer * 100:+.1f} %".replace(".", ","))
     if p7 and hace7:
         l.append(f"   7 días: {(p7 - hace7) / hace7 * 100:+.1f} %".replace(".", ","))
+    if datetime.now(MADRID).weekday() < 5:
+        lb = []
+        for nombre, (tk, fb, _) in CANAL_ACTIVOS.items():
+            d = _quote_seguro(tk, fb)
+            if d:
+                lb.append(f"   {nombre}: {_n(d['price'])} · {'+' if d['d1'] >= 0 else '-'}{_n(abs(d['d1']), 1)} %")
+        if lb:
+            l.append("\n📊 Bolsa (" + ("última sesión" if hora < 15 else "hoy") + ")")
+            l.extend(lb)
+            l.append("")
     fg = get_fear_greed()
     if fg:
         l.append(f"😨 Miedo y codicia: {fg['valor']} · {_FG_ES.get(fg['texto'], fg['texto'])}")
@@ -4952,12 +5119,18 @@ def _canal_loop():
     _canal_cargar()
     log.info(f"Canal {CANAL_ID} arrancado (activo={_canal['activo']})")
     ultimo = 0
+    ultimo_not = 0
     while True:
         try:
             _canal_toca_resumen(datetime.now(MADRID))
             if time.time() - ultimo >= CANAL_REVISION_SEG:
                 ultimo = time.time()
                 _canal_revisar_btc()
+                _canal_revisar_niveles_btc()
+                _canal_revisar_activos()
+            if time.time() - ultimo_not >= CANAL_NOTICIAS_SEG:
+                ultimo_not = time.time()
+                _canal_revisar_noticias()
         except Exception as e:
             log.error(f"_canal_loop: {e}")
         time.sleep(60)
@@ -4965,8 +5138,9 @@ def _canal_loop():
 CANAL_INTRO = (
     "👋 Bienvenido al canal de señales del Hub Financiero\n\n"
     "Aquí el bot te avisa de lo importante, sin llenarte de ruido:\n"
-    "🔔 Con sonido: movimientos fuertes de BTC (máximo 4 al día).\n"
-    "🔕 En silencio: movimientos moderados y un resumen por la mañana y otro por la tarde-noche.\n"
+    "🔔 Con sonido: movimientos fuertes de BTC o de la bolsa (máximo 4 al día).\n"
+    "🔕 En silencio: BTC cada 1.000 $, índices (S&P 500, Nasdaq, IBEX 35, DAX) y oro si se mueven más de un 2 % en el día, "
+    "noticias muy importantes (máximo 3 al día) y un resumen por la mañana y otro por la tarde-noche.\n"
     "🌙 De noche (23:00 a 7:00) solo suena un movimiento extremo.\n\n"
     "Cada aviso trae un botón para abrir el Hub, con todas las herramientas: bolsa, cripto, bonos, "
     "calendario macro y más. Es gratis y sin registros.\n\n"
@@ -4985,6 +5159,16 @@ def cmd_canal(msg):
         with _canal_lock:
             _canal["activo"] = args[0] == "on"
             _canal_guardar()
+    elif args and args[0] == "personal":
+        if len(args) > 1 and args[1] in ("on", "off"):
+            with _canal_lock:
+                _canal["personal"] = args[1] == "on"
+                _canal_guardar()
+            safe_send(msg.chat.id, "✅ Envíos personales cada 2 h " + ("ACTIVADOS (cotizaciones y noticias en tu chat)." if args[1] == "on"
+                      else "APAGADOS. El Hub sigue actualizando sus datos de bolsa."))
+        else:
+            safe_send(msg.chat.id, "Usa /canal personal on  o  /canal personal off")
+        return
     elif args and args[0] == "prueba":
         ok = _canal_enviar("🧪 Mensaje de prueba del Hub Financiero (en silencio).", silencioso=True)
         safe_send(msg.chat.id, "✅ Prueba publicada en el canal." if ok else
@@ -5008,8 +5192,12 @@ def cmd_canal(msg):
               f"Avisos con sonido hoy: {hoy}/{CANAL_MAX_SONIDO_DIA}\n"
               f"Con sonido desde {CANAL_UMBRAL_FUERTE:g} % en {CANAL_VENTANA_H} h (de noche {CANAL_UMBRAL_NOCHE:g} %)\n"
               f"En silencio desde {CANAL_UMBRAL_SUAVE:g} %\n"
-              f"Resúmenes: {', '.join(str(h) + ':00' for h in CANAL_RESUMEN_HORAS)}\n\n"
-              "/canal on · /canal off · /canal prueba · /canal intro")
+              f"Resúmenes: {', '.join(str(h) + ':00' for h in CANAL_RESUMEN_HORAS)}\n"
+              f"BTC cada {CANAL_BTC_PASO:,} $ (silencio, máx. {CANAL_BTC_MAX_DIA}/día)\n"
+              f"Bolsa/oro: desde {CANAL_ACTIVO_SUAVE:g} % en silencio, {CANAL_ACTIVO_FUERTE:g} % con sonido\n"
+              f"Noticias: máx. {CANAL_MAX_NOTICIAS_DIA}/día, en silencio\n"
+              f"Envíos personales cada 2 h: {'🟢 activados' if _canal.get('personal') else '🔴 apagados'}\n\n"
+              "/canal on · /canal off · /canal prueba · /canal intro · /canal personal on|off")
 # ═══ /VWAP — Precio medio ponderado por volumen de la sesión actual ═══
 # El VWAP no es una media cualquiera: es el precio medio al que se ha negociado un activo DESDE
 # que empezó la sesión actual, ponderado por el volumen de cada vela (los tramos con más volumen
