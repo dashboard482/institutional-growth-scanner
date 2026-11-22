@@ -5235,7 +5235,7 @@ def cmd_directo(msg):
         return
     safe_send(msg.chat.id,
         "📡 PÁGINAS EN DIRECTO\n\n"
-        "🎞 Cinta de precios — 55 criptos moviéndose en tiempo real, con aviso si alguna se mueve más de un 5% hoy:\n"
+        "🎞 Cintas de mercado — bolsa, índices, España, Europa, materias primas y cripto en cintas en vivo:\n"
         f"{URL_CINTA_DIRECTO}\n\n"
         "🧱 Velas + muros — BTC, ETH, SOL y HYPE con las zonas de compra/venta grandes del libro de órdenes:\n"
         f"{URL_MUROS_DIRECTO}\n\n"
@@ -5245,7 +5245,7 @@ def cmd_directo(msg):
         f"{URL_PRESION_DIRECTO}\n\n"
         "🩸 Liquidaciones estimadas — BTC, ETH, SOL y HYPE, con zoom y desplazamiento táctil, corto plazo y 24h:\n"
         f"{URL_LIQUIDACIONES_DIRECTO}\n\n"
-        "📉 Bonos del Tesoro EEUU — rendimiento a 30, 10 y 2 años, gráfico oficial de la Reserva Federal (FRED):\n"
+        "📉 Bonos del Tesoro EEUU — rendimiento a 30, 10 y 5 años, con histórico y curva de tipos (datos de Yahoo Finance):\n"
         f"{URL_BONOS_DIRECTO}\n\n"
         "📊 Liquidez global (Fed+BCE+BoJ) vs BTC — desplazada 90 días, velas en directo:\n"
         f"{URL_M2_DIRECTO}\n\n"
