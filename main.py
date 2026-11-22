@@ -2245,7 +2245,16 @@ def publicar_mercados_json(resultados):
                                   "g": r["grupo"]}
         if not datos:
             return
-        cuerpo = json.dumps({"t": int(time.time()), "d": datos}, ensure_ascii=False, separators=(",", ":"))
+        doc = {"t": int(time.time()), "d": datos}
+        # VIX para la página "Liquidez del mercado" (desde el móvil no se puede pedir directo)
+        try:
+            qv = get_quote("^VIX")
+            if qv and qv.get("price"):
+                doc["vix"] = {"p": round(float(qv["price"]), 2), "c": round(float(qv["d1"]), 2),
+                              "c20": round(float(qv["d20"]), 2)}
+        except Exception as e:
+            log.warning(f"publicar_mercados_json (VIX): {e}")
+        cuerpo = json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_JSON_PATH}"
         cab = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28"}
@@ -5193,7 +5202,7 @@ def cmd_canal(msg):
               f"Con sonido desde {CANAL_UMBRAL_FUERTE:g} % en {CANAL_VENTANA_H} h (de noche {CANAL_UMBRAL_NOCHE:g} %)\n"
               f"En silencio desde {CANAL_UMBRAL_SUAVE:g} %\n"
               f"Resúmenes: {', '.join(str(h) + ':00' for h in CANAL_RESUMEN_HORAS)}\n"
-              f"BTC cada {CANAL_BTC_PASO:,} $ (silencio, máx. {CANAL_BTC_MAX_DIA}/día)\n"
+              f"BTC cada {_n(CANAL_BTC_PASO)} $ (silencio, máx. {CANAL_BTC_MAX_DIA}/día)\n"
               f"Bolsa/oro: desde {CANAL_ACTIVO_SUAVE:g} % en silencio, {CANAL_ACTIVO_FUERTE:g} % con sonido\n"
               f"Noticias: máx. {CANAL_MAX_NOTICIAS_DIA}/día, en silencio\n"
               f"Envíos personales cada 2 h: {'🟢 activados' if _canal.get('personal') else '🔴 apagados'}\n\n"
