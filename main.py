@@ -5197,7 +5197,7 @@ def texto_vwap(res):
 
 URL_CINTA_DIRECTO = os.environ.get(
     "URL_CINTA_DIRECTO",
-    "https://dashboard482.github.io/dashboard/cinta_bolsa.html"
+    "https://dashboard482.github.io/dashboard/hub_bolsa.html"
 )
 URL_MUROS_DIRECTO = os.environ.get(
     "URL_MUROS_DIRECTO",
