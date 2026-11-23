@@ -5172,11 +5172,14 @@ def _canal_resumen(hora):
         try:
             kb = telebot.types.InlineKeyboardMarkup()
             kb.add(telebot.types.InlineKeyboardButton("📱 Abrir en el Hub", url=HUB_URL))
-            if len(texto) <= 1020:
-                bot.send_photo(CANAL_ID, io.BytesIO(img), caption=texto, disable_notification=True, reply_markup=kb)
-            else:
-                bot.send_photo(CANAL_ID, io.BytesIO(img), disable_notification=True)
-                _canal_enviar(texto, silencioso=True)
+            # la imagen ya es el resumen: debajo solo lo que no sale en la tabla
+            c = [l[0].strip()]
+            if p7 and hace7:
+                c.append(f"₿ BTC 7 días: {(p7 - hace7) / hace7 * 100:+.1f} %".replace(".", ","))
+            if fg:
+                c.append(f"😨 Miedo y codicia: {fg['valor']} · {_FG_ES.get(fg['texto'], fg['texto'])}")
+            c.append("\n⚠️ Orientativo, no es asesoramiento financiero (DYOR).")
+            bot.send_photo(CANAL_ID, io.BytesIO(img), caption="\n".join(c), disable_notification=True, reply_markup=kb)
             log.info(f"Canal: resumen de las {hora} h enviado con imagen")
             return
         except Exception as e:
