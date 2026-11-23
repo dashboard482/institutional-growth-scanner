@@ -444,7 +444,12 @@ def fetch_yahoo_directo(ticker, days=220):
         cs = pd.Series([c[i] for i in idx]); hs = pd.Series([(h[i] if h[i] is not None else c[i]) for i in idx])
         ls = pd.Series([(lo[i] if lo[i] is not None else c[i]) for i in idx])
         vs = pd.Series([(vol[i] if vol and i < len(vol) and vol[i] is not None else 1e6) for i in idx])
-        return build_quote(ticker, cs, hs, ls, vs)
+        q = build_quote(ticker, cs, hs, ls, vs)
+        try:
+            q["ts"] = int(res["timestamp"][idx[-1]])   # hora de la última vela (para saber si es de hoy)
+        except Exception:
+            pass
+        return q
     res = None
     for host in ("query1", "query2"):
         res = with_retry(lambda: _do(host), tries=2, base_delay=1.5, what=f"yahoo_directo {ticker} ({host})")
@@ -4825,7 +4830,7 @@ CANAL_BTC_PASO = 1000           # aviso SILENCIOSO cada vez que BTC se mueve est
 CANAL_BTC_MAX_DIA = 6           # máximo de avisos por niveles de BTC al día
 CANAL_ACTIVO_SUAVE = 2.0        # % en el día de un índice/oro -> aviso SILENCIOSO (1 por activo y día)
 CANAL_ACTIVO_FUERTE = 3.0       # % en el día -> aviso CON sonido (cuenta para el máximo de sonidos)
-CANAL_NOTICIAS_SEG = 1800       # cada cuánto se revisan las noticias (30 min)
+CANAL_NOTICIAS_SEG = 600        # cada cuánto se revisan las noticias (10 min)
 CANAL_MAX_NOTICIAS_DIA = 3      # máximo de noticias importantes al día (siempre en silencio)
 # Activos de bolsa: nombre -> (ticker, ticker alternativo, ventana horaria Madrid con el mercado abierto)
 CANAL_ACTIVOS = {
@@ -5014,6 +5019,15 @@ def _canal_revisar_activos():
         d = _quote_seguro(tk, fb)
         if not d:
             continue
+        # El % solo vale como "hoy" si la última vela es de la sesión de hoy. Al abrir, Yahoo puede
+        # seguir dando la de la sesión anterior (y entonces el aviso repetiría el movimiento de ayer).
+        ts = d.get("ts")
+        if ts and tk.startswith("^"):
+            ini = ahora.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=h0 - 1)
+            if datetime.fromtimestamp(ts, MADRID) < ini:
+                continue
+        elif h < h0 + 0.5:   # sin hora en el dato: se espera 30 min tras la apertura
+            continue
         var = d["d1"]
         a = abs(var)
         if a < CANAL_ACTIVO_SUAVE:
@@ -5055,8 +5069,12 @@ def _canal_revisar_noticias():
     lista = "\n".join(f"{i + 1}. {it['title']}" for i, (_, it) in enumerate(nuevas))
     prompt = ("Titulares NUEVOS de fuentes financieras y cripto:\n" + lista + "\n\n"
               "Elige SOLO los que sean noticias de primer nivel con potencial de mover los mercados de forma "
-              "notable (decisiones de bancos centrales, quiebras, hackeos grandes, cambios regulatorios "
-              "importantes, datos macro muy sorprendentes). Sé muy exigente: ante la duda, no lo elijas. "
+              "notable: decisiones de bancos centrales, quiebras, hackeos grandes, cambios regulatorios "
+              "importantes, datos macro muy sorprendentes, y cambios bruscos en una gran empresa que arrastran "
+              "a un índice entero (por ejemplo, el consejero delegado de Nvidia, Apple o Microsoft cesado o "
+              "readmitido, o una acción de esa talla que se dispara o se hunde más de un 10 %). "
+              "NO elijas auditorías o multas pequeñas, casos locales, opiniones, análisis técnico, previsiones "
+              "de precio ni resúmenes del día. Sé muy exigente: ante la duda, no lo elijas. "
               f"Máximo {min(2, restan)}. Formato exacto, una por línea: número|titular traducido al español "
               "de forma literal, sin añadir nada que no esté en el titular. "
               "Si ninguno lo merece, responde exactamente: NINGUNA")
@@ -5110,8 +5128,92 @@ def _canal_resumen(hora):
     if fg:
         l.append(f"😨 Miedo y codicia: {fg['valor']} · {_FG_ES.get(fg['texto'], fg['texto'])}")
     l.append("\nTodas las herramientas, en el Hub 👇\n⚠️ Orientativo, no es asesoramiento financiero (DYOR).")
-    _canal_enviar("\n".join(l), silencioso=True)
+    texto = "\n".join(l)
+    img = None
+    try:
+        img = _canal_tabla_img(precio, ayer)
+    except Exception as e:
+        log.warning(f"_canal_tabla_img: {e}")
+    if img:
+        try:
+            kb = telebot.types.InlineKeyboardMarkup()
+            kb.add(telebot.types.InlineKeyboardButton("📱 Abrir en el Hub", url=HUB_URL))
+            if len(texto) <= 1020:
+                bot.send_photo(CANAL_ID, io.BytesIO(img), caption=texto, disable_notification=True, reply_markup=kb)
+            else:
+                bot.send_photo(CANAL_ID, io.BytesIO(img), disable_notification=True)
+                _canal_enviar(texto, silencioso=True)
+            log.info(f"Canal: resumen de las {hora} h enviado con imagen")
+            return
+        except Exception as e:
+            log.warning(f"resumen con imagen: {e}")
+    _canal_enviar(texto, silencioso=True)
     log.info(f"Canal: resumen de las {hora} h enviado")
+
+# Activos extra de la tabla del resumen: (nombre, ticker, ticker alternativo, decimales)
+_CANAL_TABLA_EXTRA = [("ETH", "ETH-USD", None, 0), ("Plata", "SI=F", None, 2),
+                      ("Petróleo WTI", "CL=F", None, 2), ("Brent", "BZ=F", None, 2)]
+
+def _canal_tabla_img(btc_precio, btc_ayer):
+    """Tabla en imagen con los movimientos del día. Si un dato falta, esa fila no sale."""
+    grupos = []
+    cripto = []
+    if btc_precio and btc_ayer:
+        cripto.append(("BTC", f"${_n(btc_precio)}", (btc_precio - btc_ayer) / btc_ayer * 100))
+    d = _quote_seguro("ETH-USD")
+    if d:
+        cripto.append(("ETH", f"${_n(d['price'])}", d["d1"]))
+    if cripto:
+        grupos.append(("CRIPTO · 24 h", cripto))
+    if datetime.now(MADRID).weekday() < 5:
+        bolsa = []
+        for nombre, (tk, fb, _) in CANAL_ACTIVOS.items():
+            if nombre == "Oro":
+                continue
+            d = _quote_seguro(tk, fb)
+            if d:
+                bolsa.append((nombre, _n(d["price"]), d["d1"]))
+        if bolsa:
+            grupos.append(("BOLSA · VARIACIÓN DEL DÍA", bolsa))
+    mat = []
+    d = _quote_seguro("GC=F")
+    if d:
+        mat.append(("Oro", f"${_n(d['price'])}", d["d1"]))
+    for nombre, tk, fb, dec in _CANAL_TABLA_EXTRA[1:]:
+        d = _quote_seguro(tk, fb)
+        if d:
+            mat.append((nombre, f"${_n(d['price'], dec)}", d["d1"]))
+    if mat:
+        grupos.append(("MATERIAS PRIMAS", mat))
+    filas = sum(len(g[1]) for g in grupos)
+    if filas < 3:
+        return None
+    alto = 1.1 + filas * 0.5 + len(grupos) * 0.55
+    fig, ax = plt.subplots(figsize=(8, alto))
+    fig.patch.set_facecolor("#0d1117")
+    ax.set_facecolor("#0d1117")
+    ax.set_xlim(0, 1)
+    ax.axis("off")
+    total = filas + len(grupos) + 2
+    ax.set_ylim(total, 0)
+    ax.text(0.0, 0.6, "HUB FINANCIERO · " + datetime.now(MADRID).strftime("%d/%m/%Y %H:%M"),
+            color="white", fontsize=15, fontweight="bold", va="center")
+    y = 2.0
+    for titulo, items in grupos:
+        ax.text(0.0, y, titulo, color="#7d8590", fontsize=10.5, fontweight="bold", va="center")
+        y += 0.9
+        for nombre, precio_txt, var in items:
+            col = "#00CC44" if var >= 0 else "#FF3333"
+            ax.text(0.0, y, nombre, color="white", fontsize=14, fontweight="bold", va="center")
+            ax.text(0.58, y, precio_txt, color="#c9d1d9", fontsize=14, va="center", ha="right")
+            ax.text(1.0, y, f"{'▲' if var >= 0 else '▼'} {var:+.2f} %".replace(".", ","), color=col,
+                    fontsize=14, fontweight="bold", va="center", ha="right")
+            y += 1.0
+        y += 0.1
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=130, facecolor="#0d1117", bbox_inches="tight", pad_inches=0.25)
+    plt.close(fig)
+    return buf.getvalue()
 
 def _canal_toca_resumen(ahora):
     if ahora.hour not in CANAL_RESUMEN_HORAS or ahora.minute >= 15:
@@ -5154,6 +5256,8 @@ CANAL_INTRO = (
     "Cada aviso trae un botón para abrir el Hub, con todas las herramientas: bolsa, cripto, bonos, "
     "calendario macro y más. Es gratis y sin registros.\n\n"
     "¿Demasiados avisos? Silencia el canal en Telegram y lee solo los resúmenes.\n\n"
+    "🛡️ Ojo con las estafas: este canal NO tiene grupo de inversión ni de pago, y nadie del Hub te va a escribir "
+    "por privado ni te va a pedir dinero. Si alguien lo hace, es falso: ignóralo y bloquéalo.\n\n"
     "⚠️ DYOR: nada de esto es asesoramiento financiero. Los datos pueden tener errores o retrasos y "
     "las señales son orientativas. Investiga siempre por tu cuenta."
 )
@@ -5204,7 +5308,7 @@ def cmd_canal(msg):
               f"Resúmenes: {', '.join(str(h) + ':00' for h in CANAL_RESUMEN_HORAS)}\n"
               f"BTC cada {_n(CANAL_BTC_PASO)} $ (silencio, máx. {CANAL_BTC_MAX_DIA}/día)\n"
               f"Bolsa/oro: desde {CANAL_ACTIVO_SUAVE:g} % en silencio, {CANAL_ACTIVO_FUERTE:g} % con sonido\n"
-              f"Noticias: máx. {CANAL_MAX_NOTICIAS_DIA}/día, en silencio\n"
+              f"Noticias: máx. {CANAL_MAX_NOTICIAS_DIA}/día, en silencio, revisión cada {CANAL_NOTICIAS_SEG // 60} min\n"
               f"Envíos personales cada 2 h: {'🟢 activados' if _canal.get('personal') else '🔴 apagados'}\n\n"
               "/canal on · /canal off · /canal prueba · /canal intro · /canal personal on|off")
 # ═══ /VWAP — Precio medio ponderado por volumen de la sesión actual ═══
