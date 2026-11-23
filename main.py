@@ -6056,16 +6056,34 @@ def cmd_support(msg):
         "si procede, se reembolsa.\n\n"
         "Nota: este bot es de uso personal y no atiende otras consultas.")
 
+_AJENO_PAGOS = ("donaci", "donar", "donat", "pago", "pagu", "pagad", "reembols", "devoluc", "estrella",
+                "stars", "refund", "payment", "paid", "charge", "cobro", "cobrad")
+_ajeno_ultimo = {}   # id -> última vez que se le contestó (para no repetirse si escribe varias veces)
+
 @bot.message_handler(func=lambda m: (m.chat.type == "private" and m.from_user and m.from_user.id != ALLOWED_USER_ID
                                       and m.content_type == "text" and not (m.text or "").startswith("/")))
 def mensaje_ajeno(msg):
-    """Texto libre de otra persona (p.ej. una consulta de soporte de donaciones): se reenvía al
-    propietario para poder responder. No ejecuta nada ni da acceso a los comandos de análisis."""
+    """Texto libre de otra persona. Solo se te reenvía si habla de donaciones o pagos (soporte de
+    las Estrellas); a cualquiera se le contesta con los enlaces al Hub y al canal. No ejecuta nada
+    ni da acceso a los comandos de análisis."""
     try:
-        if ALLOWED_USER_ID:
+        txt = (msg.text or "")
+        pagos = any(k in txt.lower() for k in _AJENO_PAGOS)
+        if pagos and ALLOWED_USER_ID:
             alias = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.first_name
-            safe_send(ALLOWED_USER_ID, f"✉️ Mensaje de {alias} (id {msg.from_user.id}):\n{msg.text[:1000]}")
-        safe_send(msg.chat.id, "Mensaje recibido. Gracias.")
+            safe_send(ALLOWED_USER_ID, f"✉️ Mensaje de {alias} (id {msg.from_user.id}) sobre pagos/donaciones:\n{txt[:1000]}")
+        ahora = time.time()
+        if ahora - _ajeno_ultimo.get(msg.from_user.id, 0) < 3600:
+            return
+        _ajeno_ultimo[msg.from_user.id] = ahora
+        if pagos:
+            safe_send(msg.chat.id, "Mensaje recibido, se revisará a mano. Gracias.\nMessage received, it will be reviewed manually. Thanks.")
+        else:
+            safe_send(msg.chat.id,
+                "Este es un bot personal y no atiende consultas, pero el Hub Financiero es gratis y sin registros:\n"
+                f"📱 Hub: {HUB_URL}\n📣 Canal de señales: https://t.me/hubfinanciero_senales\n\n"
+                "This is a personal bot and doesn't answer messages, but the Hub is free, no sign-up:\n"
+                "Stocks, crypto, bonds, macro calendar and market signals (in Spanish).")
     except Exception as e:
         log.warning(f"mensaje_ajeno: {e}")
 
