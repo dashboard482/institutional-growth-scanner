@@ -2237,6 +2237,31 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "dashboard482/dashboard")
 GITHUB_JSON_PATH = os.environ.get("GITHUB_JSON_PATH", "mercados.json")
 
+# Sectores de EEUU + S&P 500 para la página "Sectores de la bolsa" del Hub (rotacion_sectorial.html):
+# cambio % en 1, 5, 21, 63 y 250 sesiones (hoy, 1 semana, 1 mes, 3 meses, 1 año).
+_SEC_JSON = ["SPY", "XLK", "XLC", "XLY", "XLF", "XLV", "XLP", "XLU", "XLI", "XLB", "XLE", "XLRE"]
+
+def _sectores_json():
+    out = {}
+    for tk in _SEC_JSON:
+        try:
+            d = fetch_yahoo_directo(tk, days=370) or get_quote(tk)
+            if not d:
+                continue
+            c = d["closes"].dropna().reset_index(drop=True)
+            if len(c) < 3:
+                continue
+            p = float(c.iloc[-1])
+            e = {"p": round(p, 2)}
+            for n in (1, 5, 21, 63, 250):
+                if len(c) > n:
+                    e[f"d{n}"] = round((p / float(c.iloc[-1 - n]) - 1) * 100, 2)
+            out[tk] = e
+        except Exception as ex:
+            log.warning(f"_sectores_json {tk}: {ex}")
+        time.sleep(0.3)
+    return out
+
 def publicar_mercados_json(resultados):
     if not GITHUB_TOKEN or not resultados:
         return
@@ -2259,6 +2284,15 @@ def publicar_mercados_json(resultados):
                               "c20": round(float(qv["d20"]), 2)}
         except Exception as e:
             log.warning(f"publicar_mercados_json (VIX): {e}")
+        # Sectores para la página "Sectores de la bolsa"
+        try:
+            sj = _sectores_json()
+            if "SPY" in sj and len(sj) >= 7:
+                doc["sec"] = sj
+            else:
+                log.warning(f"publicar_mercados_json: sectores incompletos ({len(sj)} de {len(_SEC_JSON)}), no se publican")
+        except Exception as e:
+            log.warning(f"publicar_mercados_json (sectores): {e}")
         cuerpo = json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_JSON_PATH}"
         cab = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json",
